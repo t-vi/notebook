@@ -360,6 +360,8 @@ define([
             // Mode 'null' should be plain, unhighlighted text.
             var cm_mode = langinfo.codemirror_mode || langinfo.name || 'null';
             that.set_codemirror_mode(cm_mode);
+
+	    that.execute_available_cell_replays(kinfo.available_cell_replays);
         });
         
         this.events.on('kernel_idle.Kernel', function () {
@@ -730,6 +732,22 @@ define([
             }
         });
         return result;
+    };
+
+    /**
+     * Sends structure of cells to kernel if kernel is set
+     */
+    Notebook.prototype.send_notebook_structure = function () {
+	if (this.kernel) {
+	    var cell_ids = [];
+	    this.get_cells().filter(function (cell, index) {
+		cell_ids.push(cell.cell_id);
+            });
+            var content = {
+		cells : cell_ids
+	    };
+	    this.kernel.send_shell_message("notebook_structure", content);
+	};
     };
 
 
@@ -1108,6 +1126,7 @@ define([
             var ce = this.get_cell_element(i);
             ce.remove();
             this.set_dirty(true);
+	    this.send_notebook_structure();
         }
         return this;
     };
@@ -1185,6 +1204,7 @@ define([
 
         this.undelete_backup_stack.push(undelete_backup);
         this.set_dirty(true);
+        this.send_notebook_structure();
 
         return this;
     };
@@ -1290,6 +1310,7 @@ define([
             }
 
             if(this._insert_element_at_index(cell.element,index)) {
+	        this.send_notebook_structure();
                 cell.render();
                 this.events.trigger('create.Cell', {'cell': cell, 'index': index});
                 cell.refresh();
@@ -2217,6 +2238,7 @@ define([
     Notebook.prototype._session_started = function (){
         this._session_starting = false;
         this.kernel = this.session.kernel;
+        this.send_notebook_structure();
         var ncells = this.ncells();
         for (var i=0; i<ncells; i++) {
             var cell = this.get_cell(i);
@@ -2397,6 +2419,23 @@ define([
 
         this.select(indices[indices.length - 1]);
         this.command_mode();
+        this.set_dirty(true);
+    };
+
+
+    Notebook.prototype.execute_available_cell_replays = function (kernel_available_cell_replays) {
+        var ncells = this.ncells();
+	var available_replays = new Set(kernel_available_cell_replays);
+	var cell;
+        for (i=0; i<ncells; i++) {
+	    cell = this.get_cell(i);
+	    if (cell.want_replay) {
+		if (available_replays.has(cell.cell_id)) {
+		    cell.execute(true, true);
+		}
+		delete cell.want_replay;
+	    }
+	}
         this.set_dirty(true);
     };
 
@@ -2596,10 +2635,11 @@ define([
         for (i=0; i<ncells; i++) {
             cell_data = new_cells[i];
             new_cell = this.insert_cell_at_index(cell_data.cell_type, i);
-            new_cell.fromJSON(cell_data);
+            new_cell.fromJSON(cell_data, true);
             if (new_cell.cell_type === 'code' && !new_cell.output_area.trusted) {
                 trusted = false;
             }
+	    new_cell.want_replay = true;
         }
         if (trusted !== this.trusted) {
             this.trusted = trusted;

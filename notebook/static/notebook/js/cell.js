@@ -502,6 +502,7 @@ define([
             delete data.metadata.collapsed;
         }
         data.cell_type = this.cell_type;
+	data.metadata.cell_id = this.cell_id;
         return data;
     };
 
@@ -509,8 +510,14 @@ define([
      * should be overritten by subclass
      * @method fromJSON
      **/
-    Cell.prototype.fromJSON = function (data) {
+    Cell.prototype.fromJSON = function (data, restore_cell_id) {
         if (data.metadata !== undefined) {
+	    if (data.metadata.cell_id !== undefined) {
+		if (restore_cell_id) {
+		    this.cell_id = data.metadata.cell_id;
+		}
+		delete data.metadata.cell_id;
+	    }
             this.metadata = data.metadata;
         }
     };

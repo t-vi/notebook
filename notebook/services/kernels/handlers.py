@@ -275,6 +275,11 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
             for channel, stream in self.channels.items():
                 stream.on_recv_stream(self._on_zmq_reply)
 
+    @gen.coroutine
+    def replay(self, msgs):
+       for m in msgs:
+         yield self.write_message(json.dumps(m, default=date_default))
+
     def on_message(self, msg):
         if not self.channels:
             # already closed, ignore the message
@@ -292,6 +297,15 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
             self.log.warning("No such channel: %r", channel)
             return
         stream = self.channels[channel]
+        km = self.kernel_manager
+        if self.kernel_id in km:
+            pmres = km.process_message(self.kernel_id, channel, stream, msg)
+            if not pmres:
+                return
+            elif type(pmres) == list:
+                self.log.debug("replay %s,%s",self.kernel_id, channel)
+                self.replay(pmres)
+                return
         self.session.send(stream, msg)
         
     def _on_zmq_reply(self, stream, msg_list):
@@ -306,10 +320,21 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
             )
             msg['channel'] = 'iopub'
             self.write_message(json.dumps(msg, default=date_default))
-            
+
         channel = getattr(stream, 'channel', None)
         msg_type = msg['header']['msg_type']
 
+        km = self.kernel_manager
+	# need better check whether we can close...
+        #if (self.stream.closed() or stream.closed()) and self.kernel_id not in km or km.kernel_model(self.kernel_id)["connections"]>1:
+        #    self.disconnect_from_kernel()
+        #    return
+
+        if channel == 'shell' and msg_type == 'kernel_info_reply':
+            if self.kernel_id in km:
+                msg['content']['available_cell_replays'] = km.get_available_cell_replays(self.kernel_id)
+
+        #self.log.debug("####TV####, mesg %s %s to send. %s",channel, msg_type, msg)
         if channel == 'iopub' and msg_type == 'status' and msg['content'].get('execution_state') == 'idle':
             # reset rate limit counter on status=idle,
             # to avoid 'Run All' hitting limits prematurely.
@@ -319,8 +344,12 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
             self._iopub_msgs_exceeded = False
             self._iopub_data_exceeded = False
 
+        if channel == 'shell' and msg_type in {'execute_reply'}:
+            km = self.kernel_manager
+            if self.kernel_id in km:
+                km.record_reply(self.kernel_id, channel, msg)
+
         if channel == 'iopub' and msg_type not in {'status', 'comm_open', 'execute_input'}:
-            
             # Remove the counts queued for removal.
             now = IOLoop.current().time()
             while len(self._iopub_window_byte_queue) > 0:
@@ -408,8 +437,7 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
         super(ZMQChannelsHandler, self).close()
         return self._close_future
 
-    def on_close(self):
-        self.log.debug("Websocket closed %s", self.session_key)
+    def disconnect_from_kernel(self):
         # unregister myself as an open session (only if it's really me)
         if self._open_sessions.get(self.session_key) is self:
             self._open_sessions.pop(self.session_key)
@@ -434,6 +462,13 @@ class ZMQChannelsHandler(AuthenticatedZMQStreamHandler):
                 socket.close()
         
         self.channels = {}
+
+    def on_close(self):
+        self.log.debug("Websocket closed %s", self.session_key)
+        km = self.kernel_manager
+        # don't disconnect if we are the only one
+        if self.kernel_id not in km or km.kernel_model(self.kernel_id)["connections"]>1:
+            self.disconnect_from_kernel()
         self._close_future.set_result(None)
 
     def _send_status_message(self, status):

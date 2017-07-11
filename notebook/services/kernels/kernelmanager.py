@@ -8,6 +8,7 @@
 # Distributed under the terms of the Modified BSD License.
 
 import os
+import collections
 
 from tornado import gen, web
 from tornado.concurrent import Future
@@ -257,11 +258,67 @@ class MappingKernelManager(MultiKernelManager):
             idents, fed_msg_list = session.feed_identities(msg_list)
             msg = session.deserialize(fed_msg_list)
             msg_type = msg['header']['msg_type']
-            self.log.debug("activity on %s: %s", kernel_id, msg_type)
+            cell_id = self.notebook_msg_to_cell_mapping[kernel_id].get(msg.get('parent_header',{}).get('msg_id'))
+            self.log.debug("activity on %s,%s: %s %s", kernel_id, cell_id, msg_type, msg)
+            if cell_id:
+                if msg_type == 'clear_output':
+                    self.notebook_cell_data[kernel_id][cell_id] = []
+                else:
+                    self.notebook_cell_data[kernel_id][cell_id].append(('iopub',msg))
+                self.log.debug("cache###: %s", [(d[0],d[1]['msg_type']) for d in  self.notebook_cell_data[kernel_id][cell_id]])
             if msg_type == 'status':
                 kernel.execution_state = msg['content']['execution_state']
 
         kernel._activity_stream.on_recv(record_activity)
+
+    def record_reply(self, kernel_id, channel, msg):
+        cell_id = self.notebook_msg_to_cell_mapping[kernel_id].get(msg.get('parent_header',{}).get('msg_id'))
+        if cell_id:
+            self.notebook_cell_data[kernel_id][cell_id].append((channel,msg))
+            self.log.debug("cache: %s", [(d[0],d[1]['msg_type']) for d in  self.notebook_cell_data[kernel_id][cell_id]])
+
+
+    def get_available_cell_replays(self ,kernel_id):
+        return list(self.notebook_cell_data[kernel_id].keys())
+
+    def process_message(self, kernel_id, channel, stream, msg):
+        self.log.debug(" %s: channel %s msg %s", kernel_id, channel, msg)
+        if msg['header']['msg_type'] == "notebook_structure":
+            self.cache_cell_data(kernel_id, msg['content']["cells"])
+            return False
+        elif msg['header']['msg_type'] == "execute_request":
+            cell_id = msg['content']['cell_id']
+            if not msg['content'].get('replay'):
+                self.notebook_msg_to_cell_mapping[kernel_id][msg['header']['msg_id']] = cell_id
+                self.notebook_cell_data[kernel_id][cell_id] = []
+            else:
+                self.log.debug(" %s:%s need to replay",kernel_id, cell_id)
+                self.log.debug("replaying: %s", [(d[0],d[1]['msg_type']) for d in  self.notebook_cell_data[kernel_id][cell_id]])
+                res = []
+                for c,m in self.notebook_cell_data[kernel_id][cell_id]:
+                    m = m.copy()
+                    m['parent_header'] = msg['header'].copy()
+                    m['channel'] = c
+                    res.append(m)
+                return res
+        return True
+
+    def cache_cell_data(self, kernel_id, cell_ids):
+        self.log.debug("cell data %s: %s", kernel_id, cell_ids)
+        self.notebook_data[kernel_id]["cell_ids"] = cell_ids.copy()
+        s = set(cell_ids)
+
+        #self.log.debug("before cache###: cells %s", cell_ids)
+        #self.log.debug("before cache###: %s --> ncd %ss", kernel_id, self.notebook_cell_data)
+
+        self.notebook_cell_data[kernel_id] = {k:v for k,v in self.notebook_cell_data[kernel_id].items() if k in s}
+        #self.log.debug("after cache###: %s --> ncd %ss", kernel_id, self.notebook_cell_data)
+
+    def __init__(self, *args, **vargs):
+        self.notebook_cell_data = collections.defaultdict(dict)
+        self.notebook_msg_to_cell_mapping = collections.defaultdict(dict)
+        self.notebook_data  = collections.defaultdict(dict)
+        super(MappingKernelManager, self).__init__(*args,**vargs)
 
     def initialize_culler(self):
         """Start idle culler if 'cull_idle_timeout' is greater than zero.

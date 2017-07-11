@@ -305,7 +305,7 @@ define([
      * Execute current code cell to the kernel
      * @method execute
      */
-    CodeCell.prototype.execute = function (stop_on_error) {
+    CodeCell.prototype.execute = function (stop_on_error, replay) {
         if (!this.kernel) {
             console.log(i18n.msg._("Can't execute cell since kernel is not set."));
             return;
@@ -339,9 +339,13 @@ define([
         this.set_input_prompt('*');
         this.element.addClass("running");
         var callbacks = this.get_callbacks();
-        
-        this.last_msg_id = this.kernel.execute(this.get_text(), callbacks, {silent: false, store_history: true,
-            stop_on_error : stop_on_error});
+
+	var args = {silent: false, store_history: true,
+		    stop_on_error : stop_on_error, cell_id : this.cell_id};
+	if (replay) {
+	    args.replay = true;
+	}
+        this.last_msg_id = this.kernel.execute(this.get_text(), callbacks, args);
         CodeCell.msg_cells[this.last_msg_id] = this;
         this.render();
         this.events.trigger('execute.CodeCell', {cell: this});
